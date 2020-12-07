@@ -40,7 +40,7 @@ public:
         int x = CW_USEDEFAULT,
         int y = CW_USEDEFAULT,
         //int nWidth = CW_USEDEFAULT,
-        int nWidth = 500,
+        int nWidth = 400,
         int nHeight = 400,
         //int nHeight = CW_USEDEFAULT,
         HWND hWndParent = 0,

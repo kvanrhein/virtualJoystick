@@ -18,11 +18,21 @@ using namespace std;
 #include "resource.h"
 #include "public.h"
 #include "vjoyinterface.h"
-#include "Math.h"
+#define _USE_MATH_DEFINES 
+#include <cmath>
 #define DEV_ID      1
 #define BUTTON_CNT 12
+#define PI 3.1416
 
-template <class T> void SafeRelease(T **ppT)
+float distancePoints(float x1, float y1, float x2, float y2) {
+    return sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+}
+
+float calcAngle(float x1, float y1, float x2, float y2, float x3, float y3) {
+    return - atan2f(y3 - y1, x3 - x1) + atan2(y2 - y1, x2 - x1);
+}
+
+template <class T> void SafeRelease(T** ppT)
 {
     if (*ppT)
     {
@@ -37,12 +47,12 @@ class DPIScale
     static float scaleY;
 
 public:
-    static void Initialize(ID2D1Factory *pFactory)
+    static void Initialize(ID2D1Factory* pFactory)
     {
         FLOAT dpiX, dpiY;
         pFactory->GetDesktopDpi(&dpiX, &dpiY);
-        scaleX = dpiX/96.0f;
-        scaleY = dpiY/96.0f;
+        scaleX = dpiX / 96.0f;
+        scaleY = dpiY / 96.0f;
     }
 
     template <typename T>
@@ -61,13 +71,38 @@ public:
 float DPIScale::scaleX = 1.0f;
 float DPIScale::scaleY = 1.0f;
 
+struct JoyStick {
+    float x;
+    float y;
+    float twist;
+    float radius;
+
+    void Draw(ID2D1RenderTarget* pRT, ID2D1SolidColorBrush* pBrush) {
+        pBrush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
+        D2D1_ELLIPSE joyStickEllipse;
+        joyStickEllipse.point.x = x;
+        joyStickEllipse.point.y = y;
+        joyStickEllipse.radiusX = radius;
+        joyStickEllipse.radiusY = radius;
+        pRT->DrawEllipse(joyStickEllipse, pBrush);
+        double pi = 3.1415926535;
+        pBrush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
+        pRT->DrawLine(
+            D2D1::Point2F(x + radius * cos(twist), y-radius*sin(twist)),
+            D2D1::Point2F(x + (radius + 40) * cos(twist), y-(radius + 40) * sin(twist)),
+            pBrush,
+            2.5f
+        );
+    }
+};
+
 struct JoyButton {
     D2D1_POINT_2F pos;
     D2D1_SIZE_F size;
     boolean pressed;
     int number;
-    
-    void Draw(ID2D1RenderTarget* pRT, ID2D1SolidColorBrush *pBrush, D2D1_SIZE_U winSize, IDWriteTextFormat *tf) {
+
+    void Draw(ID2D1RenderTarget* pRT, ID2D1SolidColorBrush* pBrush, D2D1_SIZE_U winSize, IDWriteTextFormat* tf) {
         WCHAR label[4] = L"";
         swprintf_s(label, L"%d ", number);
 
@@ -102,27 +137,29 @@ class MainWindow : public BaseWindow<MainWindow>
     {
         DrawMode,
         SelectMode,
-        DragMode
+        DragMode,
+        TwistMode,
     };
 
     HCURSOR                 hCursor;
     D2D1_SIZE_U             size;
     UINT32                  targetSize;
     UINT32                  midPoint;
-    ID2D1Factory            *pFactory;
-    ID2D1HwndRenderTarget   *pRenderTarget;
-    ID2D1SolidColorBrush    *pBrush;
+    ID2D1Factory* pFactory;
+    ID2D1HwndRenderTarget* pRenderTarget;
+    ID2D1SolidColorBrush* pBrush;
     D2D1_POINT_2F           ptMouse;
     D2D1_ELLIPSE            targetOutline;
-    D2D1_ELLIPSE            joyStickPosition;
+    JoyStick                theJoyStick;
     JoyButton               buttons[BUTTON_CNT];
     Mode                    mode;
     size_t                  nextColor;
+    boolean                 stillTwisting;
 
     IDWriteFactory* writeFactory;
     ID2D1Factory* pD2DFactory;
     IDWriteTextFormat* textFormat;
-   
+
     BOOL    HitTest(float x, float y);
     void    SetMode(Mode m);
     void    MoveSelection(float x, float y);
@@ -138,11 +175,12 @@ class MainWindow : public BaseWindow<MainWindow>
 
 public:
 
-    MainWindow() : pFactory(NULL), pRenderTarget(NULL), pBrush(NULL), 
-        ptMouse(D2D1::Point2F()), nextColor(0) //selection(ellipses.end())
+    MainWindow() : pFactory(NULL), pRenderTarget(NULL), pBrush(NULL),
+        ptMouse(D2D1::Point2F()), nextColor(0) 
     {
-        joyStickPosition.radiusX = 20;
-        joyStickPosition.radiusY = 20;
+        theJoyStick.radius = 20;
+        theJoyStick.twist = 0;
+        stillTwisting = false;
 
         HRESULT hr;
         hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &pD2DFactory);
@@ -234,8 +272,8 @@ HRESULT MainWindow::CreateGraphicsResources()
         GetClientRect(m_hwnd, &rc);
 
         size = D2D1::SizeU(rc.right, rc.bottom);
-        joyStickPosition.point.x = midPoint;
-        joyStickPosition.point.y = midPoint;
+        theJoyStick.x = midPoint;
+        theJoyStick.y = midPoint;
 
         for (int i = 0; i < BUTTON_CNT; i++) {
             buttons[i].pos.x = size.width - 30;
@@ -278,9 +316,9 @@ void MainWindow::OnPaint()
 
         pRenderTarget->BeginDraw();
 
-        pRenderTarget->Clear( D2D1::ColorF(D2D1::ColorF::Black) );
+        pRenderTarget->Clear(D2D1::ColorF(D2D1::ColorF::Black));
         //Target
-        targetSize = (UINT32) min(size.width, size.height) - 50.0f;
+        targetSize = (UINT32)min(size.width, size.height) - 50.0f;
         midPoint = targetSize / 2.0f + 25.0f;
         targetOutline.point.x = midPoint;
         targetOutline.point.y = midPoint;
@@ -303,15 +341,16 @@ void MainWindow::OnPaint()
         );
 
         if (firstTime) {
-           joyStickPosition.point.x = midPoint;
-           joyStickPosition.point.y = midPoint;
-           firstTime = false;
-       }
-        pBrush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
-        pRenderTarget->DrawEllipse(joyStickPosition, pBrush);
+            theJoyStick.x = midPoint;
+            theJoyStick.y = midPoint;
+            firstTime = false;
+        }
+
+        theJoyStick.Draw(pRenderTarget, pBrush);
+
         for (int i = 0; i < 12; i++)
             buttons[i].Draw(pRenderTarget, pBrush, size, textFormat);
-        
+
         hr = pRenderTarget->EndDraw();
         if (FAILED(hr) || hr == D2DERR_RECREATE_TARGET)
         {
@@ -319,13 +358,19 @@ void MainWindow::OnPaint()
         }
         EndPaint(m_hwnd, &ps);
     }
-    int xAxis = (joyStickPosition.point.x - midPoint)/(targetSize/2) * 16000 + 16000;
-    int yAxis = -(joyStickPosition.point.y - midPoint) / (targetSize/2) * 16000 + 16000;
+
+    //Send calls to vJoy, from vJoyInterface.dll:
+    int xAxis = (theJoyStick.x - midPoint) / (targetSize / 2) * 16000 + 16000;
+    int yAxis = -(theJoyStick.y - midPoint) / (targetSize / 2) * 16000 + 16000;
+    int zAxis = theJoyStick.twist * 16000 / 3.14 * 2 + 16000;
     SetAxis(xAxis, 1, HID_USAGE_X);
     SetAxis(yAxis, 1, HID_USAGE_Y);
+    SetAxis(zAxis, 1, HID_USAGE_Z);
     for (int i = 0; i < BUTTON_CNT; i++) {
         SetBtn(buttons[i].pressed, 1, i + 1);
     }
+    //end of vJoy section
+
 }
 
 void MainWindow::Resize()
@@ -338,9 +383,9 @@ void MainWindow::Resize()
         pRenderTarget->Resize(size);
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
-    joyStickPosition.point.x = midPoint;
-    joyStickPosition.point.y = midPoint;
-    
+    theJoyStick.x = midPoint;
+    theJoyStick.y = midPoint;
+
 }
 
 void MainWindow::OnLButtonDown(int pixelX, int pixelY, DWORD flags)
@@ -352,7 +397,14 @@ void MainWindow::OnLButtonDown(int pixelX, int pixelY, DWORD flags)
         buttons[i].mouseDown(dipX, dipY);
     }
 
-    if (mode == DrawMode)
+
+    float d = distancePoints(targetOutline.point.x, targetOutline.point.y, dipX, dipY);
+    if (d > targetOutline.radiusX - 5 && d < targetOutline.radiusX + 5) {
+        SetMode(TwistMode);
+        stillTwisting = true;
+    }
+
+    if (mode == DrawMode || mode == TwistMode)
     {
         POINT pt = { pixelX, pixelY };
         if (DragDetect(m_hwnd, pt))
@@ -366,14 +418,18 @@ void MainWindow::OnLButtonDown(int pixelX, int pixelY, DWORD flags)
 
 void MainWindow::OnLButtonUp()
 {
-    joyStickPosition.point.x = midPoint;
-    joyStickPosition.point.y = midPoint;
+    theJoyStick.x = midPoint;
+    theJoyStick.y = midPoint;
+    theJoyStick.twist = 0;
 
     for (int i = 0; i < BUTTON_CNT; i++) {
         buttons[i].mouseUp();
     }
+
+    stillTwisting = false;
+    SetMode(DrawMode);
     InvalidateRect(m_hwnd, NULL, FALSE);
-    ReleaseCapture(); 
+    ReleaseCapture();
 }
 
 
@@ -382,14 +438,35 @@ void MainWindow::OnMouseMove(int pixelX, int pixelY, DWORD flags)
     const float dipX = DPIScale::PixelsToDipsX(pixelX);
     const float dipY = DPIScale::PixelsToDipsY(pixelY);
 
-    if ((flags & MK_LBUTTON)) 
-    { 
-        if (mode == DrawMode)
+    float d = distancePoints(targetOutline.point.x, targetOutline.point.y, dipX, dipY);
+    if (d > targetOutline.radiusX - 5 && d < targetOutline.radiusX + 5) {
+        SetMode(TwistMode);
+    }
+    else if (!stillTwisting) {
+        SetMode(DrawMode);
+    }
+        
+
+
+    if ((flags & MK_LBUTTON))
+    {
+        float diffx = 0;
+        float diffy = 0;
+        if (mode == DrawMode || mode == TwistMode)
         {
-            const float width = (dipX - ptMouse.x);
-            const float height = (dipY - ptMouse.y);
-            joyStickPosition.point.x = midPoint + width;
-            joyStickPosition.point.y = midPoint + height;
+            diffx = (dipX - ptMouse.x);
+            diffy = (dipY - ptMouse.y);
+        }
+        if (mode == DrawMode) {
+            theJoyStick.x = midPoint + diffx;
+            theJoyStick.y = midPoint + diffy;
+        }
+        if (mode == TwistMode) {
+            theJoyStick.twist = calcAngle(targetOutline.point.x, targetOutline.point.y, ptMouse.x, ptMouse.y, dipX, dipY);
+            if (theJoyStick.twist > PI)
+                theJoyStick.twist -= PI * 2;
+            if (theJoyStick.twist < -PI)
+                theJoyStick.twist += PI * 2;
         }
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
@@ -427,6 +504,9 @@ void MainWindow::SetMode(Mode m)
     LPWSTR cursor;
     switch (mode)
     {
+    case TwistMode:
+        cursor = IDC_HAND;
+        break;
     case DrawMode:
         cursor = IDC_CROSS;
         break;
@@ -476,7 +556,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
         if (FAILED(D2D1CreateFactory(
-                D2D1_FACTORY_TYPE_SINGLE_THREADED, &pFactory)))
+            D2D1_FACTORY_TYPE_SINGLE_THREADED, &pFactory)))
         {
             return -1;  // Fail CreateWindowEx.
         }
@@ -498,17 +578,20 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
         Resize();
         return 0;
 
-    case WM_LBUTTONDOWN: 
+    case WM_LBUTTONDOWN:
         OnLButtonDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), (DWORD)wParam);
-        SetTimer(m_hwnd, 1, 1000, (TIMERPROC) NULL);
+        SetTimer(m_hwnd, 1, 1000, (TIMERPROC)NULL);
         return 0;
 
     case WM_TIMER:
-        OnLButtonUp();
+        for (int i = 0; i < BUTTON_CNT; i++) {
+            buttons[i].mouseUp();
+        }
         KillTimer(m_hwnd, 1);
+        InvalidateRect(m_hwnd, NULL, FALSE);
         return 0;
 
-    case WM_LBUTTONUP: 
+    case WM_LBUTTONUP:
         OnLButtonUp();
         return 0;
 
@@ -558,3 +641,6 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
     }
     return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 }
+
+
+
