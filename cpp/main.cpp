@@ -77,7 +77,8 @@ struct JoyStick {
     float twist;
     float radius;
 
-    void Draw(ID2D1RenderTarget* pRT, ID2D1SolidColorBrush* pBrush) {
+    void Draw(ID2D1RenderTarget* pRT, ID2D1SolidColorBrush* pBrush, float length, boolean nonZero) {
+        length -= radius * 1.5;
         pBrush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
         D2D1_ELLIPSE joyStickEllipse;
         joyStickEllipse.point.x = x;
@@ -85,14 +86,23 @@ struct JoyStick {
         joyStickEllipse.radiusX = radius;
         joyStickEllipse.radiusY = radius;
         pRT->DrawEllipse(joyStickEllipse, pBrush);
+        if (nonZero)
+            return;
+
         double pi = 3.1415926535;
         pBrush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
         pRT->DrawLine(
             D2D1::Point2F(x + radius * cos(twist), y-radius*sin(twist)),
-            D2D1::Point2F(x + (radius + 40) * cos(twist), y-(radius + 40) * sin(twist)),
+            D2D1::Point2F(x + (radius + length) * cos(twist), y-(radius + length) * sin(twist)),
             pBrush,
             2.5f
         );
+        D2D1_ELLIPSE outerCircle;
+        outerCircle.point.x = cos(twist) *( length + radius * 1.5) + x;
+        outerCircle.point.y = -sin(twist) *( length + radius * 1.5) + y;
+        outerCircle.radiusX = radius -10;
+        outerCircle.radiusY = radius - 10;
+        pRT->DrawEllipse(outerCircle, pBrush);
     }
 };
 
@@ -112,7 +122,7 @@ struct JoyButton {
         pos.y = (number - 1) * (size.height + 5) + 10;
         D2D1_RECT_F rect = D2D1::RectF(pos.x, pos.y, pos.x + size.width, pos.y + size.height);
         pBrush->SetColor(D2D1::ColorF(pressed ? D2D1::ColorF::Red : D2D1::ColorF::Green));
-        pRT->DrawRectangle(&rect, pBrush, pressed ? 4 : 2);
+        pRT->DrawRectangle(&rect, pBrush, pressed ? 2 : 1);
         pRT->DrawText(label, ARRAYSIZE(label) - 1, tf, rect, pBrush);
     }
 
@@ -155,6 +165,7 @@ class MainWindow : public BaseWindow<MainWindow>
     Mode                    mode;
     size_t                  nextColor;
     boolean                 stillTwisting;
+    boolean                 sendingToVJay;
 
     IDWriteFactory* writeFactory;
     ID2D1Factory* pD2DFactory;
@@ -172,6 +183,7 @@ class MainWindow : public BaseWindow<MainWindow>
     void    OnMouseMove(int pixelX, int pixelY, DWORD flags);
     void    OnKeyDown(UINT vkey);
     void    OnKeyUp(UINT vkey);
+    void    turnOff();
 
 public:
 
@@ -181,6 +193,7 @@ public:
         theJoyStick.radius = 20;
         theJoyStick.twist = 0;
         stillTwisting = false;
+        sendingToVJay = true;
 
         HRESULT hr;
         hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &pD2DFactory);
@@ -319,6 +332,7 @@ void MainWindow::OnPaint()
         pRenderTarget->Clear(D2D1::ColorF(D2D1::ColorF::Black));
         //Target
         targetSize = (UINT32)min(size.width, size.height) - 50.0f;
+
         midPoint = targetSize / 2.0f + 25.0f;
         targetOutline.point.x = midPoint;
         targetOutline.point.y = midPoint;
@@ -346,7 +360,7 @@ void MainWindow::OnPaint()
             firstTime = false;
         }
 
-        theJoyStick.Draw(pRenderTarget, pBrush);
+        theJoyStick.Draw(pRenderTarget, pBrush, targetSize/2, theJoyStick.x != midPoint || theJoyStick.y != midPoint);
 
         for (int i = 0; i < 12; i++)
             buttons[i].Draw(pRenderTarget, pBrush, size, textFormat);
@@ -359,7 +373,11 @@ void MainWindow::OnPaint()
         EndPaint(m_hwnd, &ps);
     }
 
+    
+    if (!sendingToVJay)
+        return;
     //Send calls to vJoy, from vJoyInterface.dll:
+    
     int xAxis = (theJoyStick.x - midPoint) / (targetSize / 2) * 16000 + 16000;
     int yAxis = -(theJoyStick.y - midPoint) / (targetSize / 2) * 16000 + 16000;
     int zAxis = theJoyStick.twist * 16000 / 3.14 * 2 + 16000;
@@ -373,6 +391,10 @@ void MainWindow::OnPaint()
 
 }
 
+void MainWindow::turnOff() {
+    sendingToVJay = false;
+}
+
 void MainWindow::Resize()
 {
     if (pRenderTarget != NULL)
@@ -382,9 +404,12 @@ void MainWindow::Resize()
         size = D2D1::SizeU(rc.right, rc.bottom);
         pRenderTarget->Resize(size);
         InvalidateRect(m_hwnd, NULL, FALSE);
+        if (size.height > 100 || size.width > 100) {
+            theJoyStick.x = midPoint;
+            theJoyStick.y = midPoint;
+        }
     }
-    theJoyStick.x = midPoint;
-    theJoyStick.y = midPoint;
+
 
 }
 
@@ -575,6 +600,9 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) {
+            turnOff();
+        }
         Resize();
         return 0;
 
